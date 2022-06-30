@@ -55,7 +55,7 @@ class Scheduler{
         void init_scheduler();
         void sched(int workid, Value& blockinfo,vector<int> offset, vector<int> offlen, vector<int> datatype, vector<string> tablecol, Value& filter,string sstfilename, string tablename);
         void csdworkdec(string csdname);
-        void Serialize(PrettyWriter<StringBuffer>& writer, Snippet& s, string csd_ip, string tablename, string CSDName);
+        void Serialize(Writer<StringBuffer>& writer, Snippet& s, string csd_ip, string tablename, string CSDName);
         string BestCSD(string sstname, int blockworkcount);
         void sendsnippet(string snippet, string ipaddr);
         // void addcsdip(Writer<StringBuffer>& writer, string s);

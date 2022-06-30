@@ -63,7 +63,7 @@ int TableManager::generate_req_json(std::string tablename,char *dst){
 	rapidjson::PrettyWriter<rapidjson::StringBuffer> writer(strbuf);
 	document.Accept(writer);
 
-	//std::cout << strbuf.GetString() << std::endl;	
+	// std::cout << strbuf.GetString() << std::endl;	
 	strcpy(dst,strbuf.GetString());
 	return 0;
 }
@@ -173,7 +173,7 @@ int TableManager::init_TableManager(){
 	close(json_fd);
 	
 	// debug code check read json
-	std::cout << "json : " << json << std::endl;
+	// std::cout << "json : " << json << std::endl;
 
 	//parse json	
 	Document document;

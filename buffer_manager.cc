@@ -1,22 +1,21 @@
 #include "buffer_manager.h"
 
-
 void sumtest::sum1(Block_Buffer bbuf){
     char testbuf[7];
     int brownum = 0;
     for(int i =0; i < bbuf.nrows; i++){
-        brownum = bbuf.rowoffset[i];
-        char *iter = bbuf.rowData + brownum;
+        brownum = bbuf.row_offset[i];
+        char *iter = bbuf.data + brownum;
         memcpy(testbuf,iter+25,7);
         float a = decimalch(testbuf);
         memcpy(testbuf,iter+32,7);
         float b = decimalch(testbuf);
-        cout << " a : " << a << " b : " << b << endl;
+        //cout << " a : " << a << " b : " << b << endl;
         data = a * b + data;
         
     }
-    cout << "data is :" << endl;
-    printf("%f",data);
+    // cout << "data is :" << endl;
+    // printf("%f",data);mergeResult.merged_block_id_list[i].first
 }
 
 float sumtest::decimalch(char b[]){
@@ -31,38 +30,68 @@ float sumtest::decimalch(char b[]){
     }
     tempbuf = (int*)num;
     ret = tempbuf[0];
-    cout << ret << endl;
+    //cout << ret << endl;
     memset(num,0,4);
     num[0] = b[6];
     tempbuf = (int*)num;
     ab = tempbuf[0];
-    cout << ab << endl;
+    //cout << ab << endl;
     cd = (float)ab/100;
-    cout << cd << endl;
+    //cout << cd << endl;
     return ret + cd;
 }
 
+int GetColumnValue(TableManager &tblManager, string col_name, string table_name, int &col_offset, int &col_length, char* rowdata){
 
-int BufferManager::InitBufferManager(Scheduler &scheduler){
- 
-    // BufferManager_Input_Thread = BlockBufferInputThread();
-    // BufferManager_Thread = BufferRunningThread(scheduler);
+    vector<TableManager::ColumnSchema> schema;
+    int resp = tblManager.get_table_schema(table_name, schema);
+    string col_name_;
+    bool isvarchar = false;
+    int coltype;
+    for(int j = 0; j < schema.size(); j++){
+        if (schema[j].type == 15){
+            //varchar일 경우 내 길이 구하기 + 뒤에값에 영향주기
+            col_offset = schema[j].offset + 1;
+            char varcharlenbuf[4];
+            memset(varcharlenbuf,0,4);
+            varcharlenbuf[3] = rowdata[col_offset];
+            int varcharlen = *((int*)varcharlenbuf);
+            col_length = varcharlen;
+            isvarchar = true;
+        }else if(isvarchar){
+            col_offset = col_offset + col_length;
+            col_length = schema[j].length;
+        }else{
+            col_offset = schema[j].offset;
+            col_length = schema[j].length;
+        }
+        col_name_ = table_name + '.' + schema[j].column_name;
+        if(col_name_ == col_name){
+            // col_offset = schema[j].offset;
+            // col_length = schema[j].length;
+            //schema[j].type;
+            coltype = schema[j].type;
+            return coltype;
+        }
+    }
+    // return schema[0].type
+    //varchar 고려 전
+}
 
+int BufferManager::InitBufferManager(Scheduler &scheduler, TableManager &tblManager){
     BufferManager_Input_Thread = thread([&](){BufferManager::BlockBufferInput();});
-    BufferManager_Thread = thread([&](){BufferManager::BufferRunning(scheduler);});
+    BufferManager_Thread = thread([&](){BufferManager::BufferRunning(scheduler, tblManager);});
 
     return 0;
 }
 
-int BufferManager::join(){
+int BufferManager::Join(){
     BufferManager_Input_Thread.join();
     BufferManager_Thread.join();
     return 0;
 }
 
 void BufferManager::BlockBufferInput(){
-    cout << "[Call Buffer Running]\n";
-    cout << "<-----------  Buffer Manager Input Running...  ----------->\n";
 
     int server_fd, client_fd;
 	int opt = 1;
@@ -90,7 +119,7 @@ void BufferManager::BlockBufferInput(){
 		exit(EXIT_FAILURE);
 	} 
 
-	if (listen(server_fd, 3) < 0){
+	if (listen(server_fd, NCONNECTION) < 0){
 		perror("listen");
 		exit(EXIT_FAILURE);
 	}
@@ -100,19 +129,18 @@ void BufferManager::BlockBufferInput(){
 			perror("accept");
         	exit(EXIT_FAILURE);
 		}
-        cout << "[Buffer Manager Recieved Merged Data]\n" << endl;
-
-		printf("***json***\n");
 
 		std::string json = "";//크기?
-		char buffer[BUFF_SIZE] = {0};
+		// char buffer[BUFF_SIZE] = {0};
         int njson;
 		size_t ljson;
-        //read( client_fd , &ljson, sizeof(ljson));
+
 		recv( client_fd , &ljson, sizeof(ljson), 0);
+
+        char buffer[ljson] = {0};
 		
 		while(1) {
-			if ((njson = /*read( client_fd , buffer, BUFF_SIZE - 1)*/recv(client_fd, buffer, BUFF_SIZE-1, 0)) == -1) {
+			if ((njson = recv(client_fd, buffer, BUFF_SIZE-1, 0)) == -1) {
 				perror("read");
 				exit(1);
 			}
@@ -124,13 +152,7 @@ void BufferManager::BlockBufferInput(){
 				break;
 		}
 		
-		cout << json << endl;
-		// cout << "#json len: " << strlen(json) << " | read_size: " << read_size << endl;
-
         send(client_fd, cMsg, strlen(cMsg), 0);
-        cout << "server ok" << endl;
-
-		printf("***data***\n");
 
 		char data[BUFF_SIZE];//크기?
         char* dataiter = data;
@@ -140,43 +162,24 @@ void BufferManager::BlockBufferInput(){
         size_t ldata = 0;
         recv(client_fd , &ldata, sizeof(ldata),0);
         totallen = ldata;
-        // cout << "ldata : " << ldata << " ndata : " << ndata << endl;
+
+        // cout << "totallen: " << totallen << endl;
+
 		while(1) {
-            // memset(buffer, 0, BUFF_SIZE);
 			if ((ndata = recv( client_fd , dataiter, ldata,0)) == -1) {
 				perror("read");
 				exit(1);
 			}
             dataiter = dataiter+ndata;
 			ldata -= ndata;
-            // cout << "ldata : " << ldata << " ndata : " << ndata << endl;
-		    //buffer[ndata] = '\0';
-            // strcat(data, buffer);
 
 		    if (ldata == 0)
 				break;
 		}
-        // for(int i = 0; i < totallen; i ++){
-        //     cout << data[i];
-        // }
-        // cout << endl;
 
         send(client_fd, cMsg, strlen(cMsg), 0);
-        cout << "server ok" << endl;
 
-		//int read_size = read(client_fd , data, BUFF_SIZE);
-
-        // cout << data << endl;
-
-        // string a(data);
-        // cout << strlen(a.c_str()) << endl;
-		//cout << "#data len: " << strlen(a.c_str()) << " | read_size: " << read_size << endl;
-
-        //  for(int i=0; i<BUFF_SIZE; i++){
-        //      cout<<data[i];
-        //  }
-        //  cout << "\n--" << endl;
-
+        // cout << "## BufferQueue.push_work(BlockResult(json.c_str(), data)) ##" << endl;
 		BufferQueue.push_work(BlockResult(json.c_str(), data));		
         
         close(client_fd);		
@@ -184,240 +187,420 @@ void BufferManager::BlockBufferInput(){
 	close(server_fd);
 }
 
-void BufferManager::BufferRunning(Scheduler &scheduler){
-    cout << "<-----------  Buffer Manager Running...  ----------->\n";
-
+void BufferManager::BufferRunning(Scheduler &scheduler, TableManager &tblManager){
     while (1){
         BlockResult blockResult = BufferQueue.wait_and_pop();
+        // cout << "result csdname: " << blockResult.csd_name << endl;
+        // cout << "result rows: " << blockResult.rows << endl;
+        // cout << "result length: " << blockResult.length << endl;
 
-		for(int n=0; n < blockResult.length; n++){
-			printf("%02X",(u_char)blockResult.data[n]);
-		}
-        cout << " <------------Buffer Merging Block------------>" << endl;
-                
-        MergeBlock(blockResult, scheduler);
+        if(m_WorkIDManager.find(blockResult.work_id)==m_WorkIDManager.end()){
+            cout << "There isn't WORKID [" << blockResult.work_id << "]" << endl;
+            break;
+        }
+
+        MergeBlock(blockResult, scheduler, tblManager);
     }
 }
 
-void BufferManager::MergeBlock(BlockResult result,Scheduler &scheduler){
-    //printf("~BufferManager::MergeBlock~ # workid: %d, blockid_size: %ld, rows: %d, length: %d, offset_len: %ld\n",result.work_id, result.block_id_list.size(), result.rows, result.length, result.row_offset.size());
+void BufferManager::MergeBlock(BlockResult result, Scheduler &scheduler, TableManager &tblManager){
+    string q = m_WorkIDManager[result.work_id];
+    int w = result.work_id;
 
-    // cout << "-------------------------------------- Block Info----------------------------------"<<endl;
-    // cout << "| work id: " << result.work_id << " | length: " << result.length << " | rows: " << result.rows << endl;
-    // cout << "| block id list: { block id : block start offset : block size : is full block }" << endl;
-    // for(int i=0; i<result.block_id_list.size(); i++){
-    //     cout << " -block list[" << i << "] : { " << get<0>(result.block_id_list[i]) << " : " 
-    //     <<  get<1>(result.block_id_list[i]) << " : " <<  get<2>(result.block_id_list[i]) 
-    //     << " : " <<  get<3>(result.block_id_list[i]) << " }" << endl;
-    // }
-    // cout << "------------------------------------------------------------------------------------"<<endl;
-    // printf("Recieved Data : \n[");
-    // for(int n=0; n < result.length; n++){
-    //     printf("%02X",(u_char)result.data[n]);
-    // }
-    // cout << "]" <<endl;
-    // cout << "------------------------------------------------------------------------------------"<<endl;
-    // cout << "Work ID ["<<result.work_id<<"] merge start"<<endl;
-	
-    int row_len = 0;
-    int key = result.work_id;
+    Work_Buffer* myWorkBuffer = m_BufferManager[q]->work_buffer_list[w];
 
-    if(m_BufferManager[key]->is_done){
-        // cout << "* WorkID [" << result.work_id << "] is done! *" << endl;
+    //작업 종료된 id의 데이터인지 확인
+    if(myWorkBuffer->is_done){
         return;
     }
 
-    vector<tuple<int, int, int, bool>>::iterator iter;// block_id : block start offset : block size : is full block
-    for (iter = result.block_id_list.begin(); iter != result.block_id_list.end(); iter++) {
-		int block_id_ = get<0>(*iter);
-        int block_offset_ = get<1>(*iter);
-        int block_size_ = get<2>(*iter);
-        bool is_full_block_ = get<3>(*iter);
-        bool is_need_block = (find(m_BufferManager[key]->need_block_list.begin(), m_BufferManager[key]->need_block_list.end(),
-                                 block_id_) != m_BufferManager[key]->need_block_list.end());
-        bool is_last_block = (iter == (result.block_id_list.end()-1));
+    //병합 완료된 블록 확인
+    vector<pair<int,list<int>>>::iterator iter1;
+    for (iter1 = result.block_id_list.begin(); iter1 != result.block_id_list.end(); iter1++) {
+        int is_full = (*iter1).first;
+        if(is_full){
+            list<int>::iterator iter2;
+            for(iter2 = (*iter1).second.begin(); iter2 != (*iter1).second.end(); iter2++){
+                if(*iter2 < result.last_valid_block_id){
+                    myWorkBuffer->need_block_list.erase(*iter2);
+                }else{
+                    cout << "-------*iter2 > result.last_valid_block_id-----------" << endl;
+                }
+            }
+        }
+        // cout << endl;
+        // cout << "size: " << myWorkBuffer->need_block_list.size() << endl;
+    }
+
+    cout << "(total/result/total-result)" << "(" << myWorkBuffer->left_block_count <<"/" << result.result_block_count << "/" << myWorkBuffer->left_block_count-result.result_block_count << ")" << endl;
+    scheduler.csdworkdec(result.csd_name, result.result_block_count);
+    myWorkBuffer->left_block_count -= result.result_block_count;
+
+    //wotk_type에 따라 작업 수행
+    switch (myWorkBuffer->work_type){
+        case Buffer_Work_Type::JoinX:
+        {    
+            // cout << "#work_type : JoinX" << endl;
+
+            // cout << "+++++ block save +++++" << endl;
+            myWorkBuffer->merging_block_buffer.nrows = result.rows;
+            myWorkBuffer->merging_block_buffer.length = result.length;
+            memcpy(myWorkBuffer->merging_block_buffer.data,result.data,result.length);
+            myWorkBuffer->merging_block_buffer.row_offset.assign(result.row_offset.begin(), result.row_offset.end()); 
+            myWorkBuffer->row_all += result.rows;
+            // cout << "row_all: " << myWorkBuffer->row_all << endl;
+            // cout << "A" << endl;
+            myWorkBuffer->PushWork();
+
+            break;
+        }
+
+        case Buffer_Work_Type::JoinO_HasMapX_MakeMapO :
+        {
+            // cout << "#work_type : JoinO_HasMapX_MakeMapO" << endl;
+
+            // cout << "+++++ row make map +++++" << endl;
+            //type int
+            for(int i=0; i<result.rows; i++){
+                int row_offset = result.row_offset[i];
+                // make map
+                for (int m = 0; m < myWorkBuffer->make_map_col.size(); m++) {
+                    string my_col = myWorkBuffer->make_map_col[m];
+                    int col_offset, col_length; // 받아올 변수
+                    int coltype = GetColumnValue(tblManager, my_col, myWorkBuffer->table_name, col_offset, col_length, result.data+row_offset);
+                    //cout << "#col_offset = " << col_offset << " | col_length = " << col_length << endl;
+
+                    char tempbuf[col_length];
+                    memcpy(tempbuf, result.data+row_offset+col_offset, col_length);
+                    int my_value = 0;
+                    if (coltype == 8){
+                        my_value = *((int64_t *)tempbuf);
+                    }else{
+                        my_value = *((int *)tempbuf);
+                    }
+                    // int my_value = *((int *)tempbuf);
+                    // cout << "-col_name: " << my_col << " | my_value : " << my_value << endl;
+
+                    m_BufferManager[q]->col_map[my_col].insert(my_value);
+                }   
+            }
+
+            // cout << "+++++ block save +++++" << endl;
+            myWorkBuffer->merging_block_buffer.nrows = result.rows;
+            myWorkBuffer->merging_block_buffer.length = result.length;
+            memcpy(myWorkBuffer->merging_block_buffer.data,result.data,result.length);
+            myWorkBuffer->merging_block_buffer.row_offset.assign(result.row_offset.begin(), result.row_offset.end());
+                
+            //map 출력
+            //    for (int m = 0; m < myWorkBuffer->make_map_col.size(); m++) {
+            //         string my_col = myWorkBuffer->make_map_col[m];
+            //         unordered_map<int,int> map;
+            //         map = m_BufferManager[q]->col_map[my_col];
+            //         cout<< my_col << " map : [ ";
+            //         for(auto const&i:map){
+            //             cout << i.first << " "; 
+            //         }
+            //         cout << " ]" << endl;
+            //    }
+            myWorkBuffer->PushWork();
+
+            break;
+        }
+
+        case Buffer_Work_Type::JoinO_HasMapO_MakeMapX :
+        {
+            // cout << "#work_type : JoinO_HasMapO_MakeMapX" << endl;
+
+            int row_len = 0;
+            vector<int> temp_offset;
+            temp_offset.assign(result.row_offset.begin(), result.row_offset.end());
+            temp_offset.push_back(result.length);
+
+            // cout << "+++++ row join column +++++" << endl;
+            for(int i=0; i<result.rows; i++){
+                int row_offset = result.row_offset[i];
+                bool passed = true;
+                // column join
+                for (int j = 0; j < myWorkBuffer->join_col.size(); j++) {
+                    string my_col = myWorkBuffer->join_col[j].first;
+                    string opp_col = myWorkBuffer->join_col[j].second;
+                    int col_offset, col_length; // 받아올 변수
+                    int coltype = GetColumnValue(tblManager, my_col, myWorkBuffer->table_name, col_offset, col_length, result.data+row_offset);
+                    // cout << "#col_offset = " << col_offset << " | col_length = " << col_length << endl;
+                    
+                    char tempbuf[col_length];
+                    memcpy(tempbuf,result.data+row_offset+col_offset,col_length);
+                    int my_value = 0;
+                    if (coltype == 8){
+                        my_value = *((int64_t *)tempbuf);
+                    }else{
+                        my_value = *((int *)tempbuf);
+                    }
+                    // int my_value = *((int *)tempbuf);
+                    // cout << "-col_name: " << my_col << " | my_value : " << my_value << endl;
+
+                    if(m_BufferManager[q]->col_map[opp_col].find(my_value) == m_BufferManager[q]->col_map[opp_col].end()){
+                        passed = false;
+                        break;
+                    }
+                }   
+
+                if(passed){
+                    // cout << "+++++ row save +++++" << endl;
+                    row_len = temp_offset[i+1] - temp_offset[i];
+                    if(myWorkBuffer->merging_block_buffer.length + row_len > BUFF_SIZE){ //row추가시 데이터 크기 넘으면
+                        myWorkBuffer->PushWork();
+                    }
+                    myWorkBuffer->merging_block_buffer.row_offset.push_back(myWorkBuffer->merging_block_buffer.length);
+                    myWorkBuffer->merging_block_buffer.nrows += 1;
+                    int data_offset = myWorkBuffer->merging_block_buffer.length;
+                    memcpy(myWorkBuffer->merging_block_buffer.data + data_offset, result.data + temp_offset[i], row_len);
+                    myWorkBuffer->merging_block_buffer.length += row_len;
+                }
+
+            }
+
+            break;    
+        }
+
+        case Buffer_Work_Type::JoinO_HasMapO_MakeMapO :
+        {
+            // cout << "#work_type : JoinO_HasMapO_MakeMapO" << endl;
+
+            int row_len = 0;
+            vector<int> temp_offset;
+            temp_offset.assign(result.row_offset.begin(), result.row_offset.end());
+            temp_offset.push_back(result.length);
+
+            // cout << "+++++ row make map / row join column +++++" << endl;
+            for(int i=0; i<result.rows; i++){
+                int row_offset = result.row_offset[i];
+
+                // make map
+                for (int m = 0; m < myWorkBuffer->make_map_col.size(); m++) {
+                    string my_col = myWorkBuffer->make_map_col[m];
+                    int col_offset, col_length; // 받아올 변수
+                    int coltype = GetColumnValue(tblManager, my_col, myWorkBuffer->table_name, col_offset, col_length, result.data+row_offset);
+                    //cout << "#col_offset = " << col_offset << " | col_length = " << col_length << endl;
+                    
+                    char tempbuf[col_length];
+                    memcpy(tempbuf,result.data+row_offset+col_offset,col_length);
+                    // int my_value = *((int *)tempbuf);
+                    int my_value = 0;
+                    if (coltype == 8){
+                        my_value = *((int64_t *)tempbuf);
+                    }else{
+                        my_value = *((int *)tempbuf);
+                    }
+                    // cout << "-col_name: " << my_col << " | my_value : " << my_value << endl;
+                    
+                    m_BufferManager[q]->col_map[my_col].insert({my_value,1});
+                } 
+
+                bool passed = true;
+
+                // column join
+                for (int j = 0; j < myWorkBuffer->join_col.size(); j++) {
+                    string my_col = myWorkBuffer->join_col[j].first;
+                    string opp_col = myWorkBuffer->join_col[j].second;
+                    int col_offset, col_length; // 받아올 변수
+                    int coltype = GetColumnValue(tblManager, my_col, myWorkBuffer->table_name, col_offset, col_length, result.data+row_offset);
+                    // cout << "#col_offset = " << col_offset << " | col_length = " << col_length << endl;
+                    
+                    char tempbuf[col_length];
+                    memcpy(tempbuf,result.data+row_offset+col_offset,col_length);
+                    // int my_value = *((int *)tempbuf);
+                    int my_value = 0;
+                    if (coltype == 8){
+                        my_value = *((int64_t *)tempbuf);
+                    }else{
+                        my_value = *((int *)tempbuf);
+                    }
+                    // cout << "-col_name: " << my_col << " | my_value : " << my_value << endl;
+
+                    if(m_BufferManager[q]->col_map[opp_col].find(my_value) == m_BufferManager[q]->col_map[opp_col].end()){
+                        passed = false;
+                        break;
+                    }
+                }   
+                
+                if(passed){
+                    // cout << "+++++ save row +++++" << endl;
+                    row_len = temp_offset[i+1] - temp_offset[i];
+                    if(myWorkBuffer->merging_block_buffer.length + row_len > BUFF_SIZE){ //row추가시 데이터 크기 넘으면
+                        myWorkBuffer->PushWork();
+                    }
+                    myWorkBuffer->merging_block_buffer.row_offset.push_back(myWorkBuffer->merging_block_buffer.length);
+                    myWorkBuffer->merging_block_buffer.nrows += 1; 
+                    int data_offset = myWorkBuffer->merging_block_buffer.length;
+                    memcpy(myWorkBuffer->merging_block_buffer.data + data_offset, result.data + temp_offset[i], row_len);
+                    myWorkBuffer->merging_block_buffer.length += row_len;
+                }
+
+            }
+            break;
+        }
+
+    }
+
+    // cout << "size: " << myWorkBuffer->need_block_list.size() << endl;
+
+    //필요한 블록이 다 모였는지 확인
+    if((myWorkBuffer->need_block_list.size() == 0) || (myWorkBuffer->left_block_count == 0)){
+        cout << "FINISHED " << (myWorkBuffer->need_block_list.size() == 0) << "/" << (myWorkBuffer->left_block_count == 0) << endl;
         
-        // cout << "Merging Block ID [" << block_id_ << "]..." << endl;
-        // cout << "@is_last_block:  " << is_last_block << " @is_need_block_:  " << is_need_block << endl;
-
-        //필요하지 않은 블록일때
-        if(!is_need_block){
-            // cout << "* Not need Block ID [" << block_id_ << "] *" << endl;
-            continue;
-        }       
-      
-        // 필요한 블록이고 블록 사이즈가 0이 아닐때
-        if(block_size_ != 0){          
-            /*중요*/ vector<int> temp_offset; // 현재 블록에 해당하는 임시 row_offset
-            temp_offset.clear();
-
-            int data_start_offset = block_offset_; // data index
-            int data_end_offset = block_offset_ + block_size_ - 1;
-            int row_start_index = find(result.row_offset.begin(), result.row_offset.end(), data_start_offset) 
-                                        - result.row_offset.begin(); // row_offset index
-            int next_block_start_index, row_end_index;
-
-            // cout << "# block_size: " << block_size_ << " block_offset: " << block_offset_ << " plus:" << block_size_ + block_offset_ << "length" << result.length << endl;
-            if(is_last_block || (block_size_ + block_offset_ == result.length)){
-                // cout << "here1" << endl;
-                next_block_start_index = result.length;
-                row_end_index = result.row_offset.size();
-
-                for(int q = row_start_index; q < result.row_offset.size(); q++){
-                    temp_offset.push_back(result.row_offset[q]);
-                } 
-                temp_offset.push_back(next_block_start_index);
-            }
-            else{
-                // cout << "here2" << endl;
-                next_block_start_index = find(result.row_offset.begin(), result.row_offset.end(), data_end_offset+1)
-                                        - result.row_offset.begin();
-                row_end_index =  next_block_start_index - 1;
-
-                for(int q = row_start_index; q < next_block_start_index; q++){
-                    temp_offset.push_back(result.row_offset[q]);
-                } 
-                temp_offset.push_back(result.row_offset[next_block_start_index]);  
-            }
+        myWorkBuffer->merging_block_buffer.last_merging_buffer = true;
+        myWorkBuffer->is_done = true;  
+        
+        if(myWorkBuffer->work_type == 2 || myWorkBuffer->work_type == 3){
+            myWorkBuffer->PushWork();
+        }
             
-            // for(int q = 0; q<temp_offset.size(); q++){
-            //     printf("(t1:%d)", temp_offset[q]);
-            // } 
-            // cout << "--" << endl;                 
+        cout << "Work [" << myWorkBuffer->work_id << "] Done!!" << endl;               
+    }
 
-            //row 넣기 전 확인
-            // row_len = temp_offset[1] - temp_offset[0];
-            // if(m_BufferManager[key]->merging_block_buffer.length + row_len > BUFFER_SIZE){
-            //     cout << "# Now Merging Block Size : " << m_BufferManager[key]->merging_block_buffer.length << endl;
-            //     cout << "** Enqueue Merging Block to Merged Block **" << endl;
-            //     m_BufferManager[key]->merged_block_buffer.push_work(m_BufferManager[key]->merging_block_buffer);
-            //     m_BufferManager[key]->merging_block_buffer.length = 0;
-            //     m_BufferManager[key]->merging_block_buffer.nrows = 0;
-            //     m_BufferManager[key]->merging_block_buffer.rowoffset.clear();
-            // }
+}
 
-            for(int i=0; i<temp_offset.size()-1; i++){
-                row_len = temp_offset[i+1] - temp_offset[i];
-                if(m_BufferManager[key]->merging_block_buffer.length + row_len > BUFF_SIZE){ //row추가시 데이터 크기 넘으면
-                    // cout << "** Now Merging Block Size : " << m_BufferManager[key]->merging_block_buffer.length
-                    // << "-> Enqueue **" << endl;
-                    m_BufferManager[key]->merged_block_buffer.push_work(m_BufferManager[key]->merging_block_buffer);
-                    m_BufferManager[key]->merging_block_buffer.length = 0;
-                    m_BufferManager[key]->merging_block_buffer.nrows = 0;
-                    m_BufferManager[key]->merging_block_buffer.rowoffset.clear();
-                }
-
-                m_BufferManager[key]->merging_block_buffer.rowoffset.push_back(
-                                            m_BufferManager[key]->merging_block_buffer.length); //현재 row 시작 offset
-                m_BufferManager[key]->merging_block_buffer.nrows += 1;
-                int data_offset = m_BufferManager[key]->merging_block_buffer.length;
-                for(int j = temp_offset[i]; j<temp_offset[i+1]; j++){
-                    m_BufferManager[key]->merging_block_buffer.rowData[data_offset] =  result.data[j]; // 현재 row데이터 복사
-                    data_offset += 1;
-                }
-                m_BufferManager[key]->merging_block_buffer.length += row_len;// 데이터 길이 = row 전체 길이
-            }
-        }
-        
-        //필요한 블록이고 사이즈가 0일때
-        else{ 
-            // cout << "* block id [" << block_id_ << "] size 0* " << endl;
-        }
-
-        //필요한 블록이고 전체 블록일때
-        if(is_full_block_){
-            // cout << "call scheduler: " << result.csd_name << endl;
-            scheduler.csdworkdec(result.csd_name);
-            m_BufferManager[key]->merged_block_list.push_back(block_id_);
-        }
-
-        // cout << "Need Block List : [" ;
-        // for(int i=0; i<m_BufferManager[key]->need_block_list.size(); i++){
-        //     cout << m_BufferManager[key]->need_block_list[i] << " ";
-        // }
-        // cout << "]" << " Length : " << m_BufferManager[key]->need_block_list.size() << endl;
-
-        // cout << "Merged Block ID : [" ;
-        // for(int i=0; i<m_BufferManager[key]->merged_block_list.size(); i++){
-        //     cout << m_BufferManager[key]->merged_block_list[i] << " ";
-        // }
-        // cout << "]" << " Length : " << m_BufferManager[key]->merged_block_list.size() << endl;
-
-        // cout << "Merged Block Length : " << m_BufferManager[key]->merged_block_list.size() << endl;
-        // cout << "Merging Buffer Info { length: " << m_BufferManager[key]->merging_block_buffer.length 
-        // << " rows: " << m_BufferManager[key]->merging_block_buffer.nrows << " }" << endl;
-
-        // cout << "--------------------------------- Merging Buffer Info--------------------------------"<<endl;
-        // cout << " | length: " << m_BufferManager[key]->merging_block_buffer.length 
-        //      << " | rows: " << m_BufferManager[key]->merging_block_buffer.nrows << " | " << endl;
-        // cout << "------------------------------------------------------------------------------------"<<endl;
-        // printf("Merging Data : \n[");
-        // for(int n=0; n < m_BufferManager[key]->merging_block_buffer.length; n++){
-        //     printf("%02X",(u_char)m_BufferManager[key]->merging_block_buffer.rowData[n]);
-        // }
-        // cout << "]" <<endl;
-        // cout << "------------------------------------------------------------------------------------"<<endl;
-
-        //필요한 블록이 다 모였는지 확인
-        if(m_BufferManager[key]->need_block_list.size() 
-            == m_BufferManager[key]->merged_block_list.size() ){
-            // cout << "** Merge Last Block Completed -> Enqueue **" << endl;
-            m_BufferManager[key]->merged_block_buffer.push_work(m_BufferManager[key]->merging_block_buffer);
-            m_BufferManager[key]->merging_block_buffer.length = 0;
-            m_BufferManager[key]->merging_block_buffer.nrows = 0;
-            m_BufferManager[key]->merging_block_buffer.rowoffset.clear();
-            m_BufferManager[key]->is_done = true;
-            // cout << "* work id[" << m_BufferManager[key]->WorkID << "] is done!! *" << endl;            
-        }
-
-	}
-    
+void Work_Buffer::PushWork(){
+    // if(work_type == 1 || work_type == 3){
+    //     make_map_queue.push_work(merging_block_buffer);
+    // }
+    return_block_queue.push_work(merging_block_buffer);
+    merging_block_buffer.InitBlockBuffer();
 }
 
 int BufferManager::GetData(Block_Buffer &dest){
-    if(m_BufferManager.find(dest.work_id)==m_BufferManager.end()){
+    string q_id = m_WorkIDManager[dest.work_id];
+    if(m_WorkIDManager.find(dest.work_id)==m_WorkIDManager.end()){
         cout << "no work_id" << endl;
         return -1;
     }
-    else if(m_BufferManager[dest.work_id]->is_done &&
-         m_BufferManager[dest.work_id]->merged_block_buffer.is_empty()){
+    else if(m_BufferManager[q_id]->work_buffer_list[dest.work_id]->is_done &&
+        m_BufferManager[q_id]->work_buffer_list[dest.work_id]->return_block_queue.is_empty()){
         cout << "done" << endl;
         return -2;
     }
     else{
-        Block_Buffer BBuf = m_BufferManager[dest.work_id]->merged_block_buffer.wait_and_pop();
+        Block_Buffer BBuf = m_BufferManager[q_id]->work_buffer_list[dest.work_id]->return_block_queue.wait_and_pop();
         dest.length = BBuf.length;
         dest.nrows = BBuf.nrows;
+        memcpy(dest.data, BBuf.data, BBuf.length);
+        dest.row_offset.assign(BBuf.row_offset.begin(),BBuf.row_offset.end());
 
-        cout << "send to handler : " << endl;
-        for (int i =0; i < BBuf.length; i++){
-            printf("%02X",(u_char)BBuf.rowData[i]);
-        }
-        cout << "-------------------------------------------------------"<< endl;
-        
-        // for(int i=0; i<BUFF_SIZE; i++){
-        //     dest.rowData[i] = BBuf.rowData[i];
+        // cout << "send to handler : " << endl;
+        // for (int i =0; i < BBuf.length; i++){
+        //     printf("%02X ",(u_char)BBuf.data[i]);
         // }
-        // cout << endl;
-        memcpy(dest.rowData,BBuf.rowData,BBuf.length);
-        for(int i=0; i < BBuf.rowoffset.size(); i++){
-            dest.rowoffset.push_back(BBuf.rowoffset[i]);
-        }
+        // cout << "-------------------------------------------------------"<< endl;
+
     }
     return 1;
 }
 
-int BufferManager::SetWork(int work_id, vector<int> block_list){
-    if(!(m_BufferManager.find(work_id)==m_BufferManager.end())){
-        cout << "work_id Duplicate Error" << endl;
+// void Work_Buffer::WorkBufferMakeMap(unordered_map<string, unordered_map<int,int>> col_map_, TableManager tblManager){
+
+//     while(1){
+//         Block_Buffer blockBuffer = make_map_queue.wait_and_pop();
+                
+//         int row_len = 0;
+//         vector<int> temp_offset;
+//         temp_offset.assign( blockBuffer.row_offset.begin(), blockBuffer.row_offset.end() );
+//         temp_offset.push_back(blockBuffer.length);
+
+//         for(int i=0; i<blockBuffer.nrows; i++){
+//             for (int m = 0; m < make_map_col.size(); m++) {
+//                 string my_col = make_map_col[m];
+//                 int col_offset, col_length; // 받아올 변수
+//                 GetColumnValue(tblManager, my_col, table_name, col_offset, col_length);
+//                 int my_value = *((int*)blockBuffer.data[i]+col_offset);
+//                 cout << "my_value : " << my_value << endl;
+//                 col_map_[my_col].insert({my_value,1});
+//             }
+//         } 
+
+//         if(blockBuffer.last_merging_buffer){
+//             return;
+//         }
+//     }    
+// }
+
+int BufferManager::SetWork(string query_, int work_id_, string table_name_,
+            vector<tuple<string,string,string>> join_, vector<int> block_list_){
+    cout << "#Set Work Called!" << endl;            
+    // cout << "#work_id: " << work_id_ << "| table_name: " << table_name_ 
+    // << "need_block size: " << block_list_.size() << endl;
+    if(m_BufferManager.find(query_)==m_BufferManager.end()){
+        cout << "Initialize first " << endl;
         return -1;
     }
 
-    Block_Buffer blockBuffer;
-    Work_Buffer* workBuffer = new Work_Buffer(work_id, block_list, blockBuffer);
+    vector<string> make_map_col;
+    vector<pair<string,string>> join_col;
+    int work_type = Buffer_Work_Type::JoinX;
 
-    m_BufferManager.insert(pair<int,Work_Buffer*>(work_id,workBuffer));
+    //CHECK WORK_TYPE
+    if(join_.size() != 0){
+        vector<tuple<string,string,string>>::iterator join_iter;
+        for (join_iter = join_.begin(); join_iter != join_.end(); join_iter++){
+            string my_col = get<0>(*join_iter);
+            string oper = get<1>(*join_iter);
+            string opp_col = get<2>(*join_iter);
 
+            cout << "{ " << my_col<< " " << oper << " " << opp_col  << "}" << endl;
+
+            if(m_BufferManager[query_]->col_map.find(opp_col) 
+                        == m_BufferManager[query_]->col_map.end()){ //Map X
+                cout << "#Map X : " << opp_col << endl;
+                if(work_type == Buffer_Work_Type::JoinO_HasMapO_MakeMapX 
+                    || work_type == Buffer_Work_Type::JoinO_HasMapO_MakeMapO){
+                    work_type = Buffer_Work_Type::JoinO_HasMapO_MakeMapO;
+                }else{
+                    work_type = Buffer_Work_Type::JoinO_HasMapX_MakeMapO;
+                }
+                make_map_col.push_back(my_col);
+            }else{ //Map O
+                cout << "#Map O : " << opp_col << endl;
+                if(work_type == Buffer_Work_Type::JoinX 
+                    || work_type == Buffer_Work_Type::JoinO_HasMapO_MakeMapX){
+                    work_type = Buffer_Work_Type::JoinO_HasMapO_MakeMapX;
+                }else{
+                    work_type = Buffer_Work_Type::JoinO_HasMapO_MakeMapO;
+                }            
+                join_col.push_back({my_col,opp_col});
+            }
+        }
+    }
+
+    Work_Buffer* myWorkBuffer = new Work_Buffer(work_id_, table_name_, make_map_col, 
+                                                join_col, block_list_,work_type);
+
+    m_BufferManager[query_]->work_buffer_list.insert(pair<int,Work_Buffer*>(work_id_,myWorkBuffer));
+    m_WorkIDManager.insert(pair<int,string>(work_id_ ,query_));
+
+    // //MAKE_MAP THREAD  
+    // if(myWorkBuffer->work_type == 1 || myWorkBuffer->work_type == 3){
+    //     thread Work_Buffer_Get_Col_Thread = thread([&](){myWorkBuffer->WorkBufferMakeMap(m_BufferManager[query_]->col_map,tblManager);});
+    //     Work_Buffer_Get_Col_Thread.join();
+    // }
+
+    cout << "#my work type : " << work_type << endl;
+    
     return 1;
+}
+
+int BufferManager::InitQuery(string query){
+    cout << "#Init Query Called!" << endl;
+    if(!(m_BufferManager.find(query)==m_BufferManager.end())){
+        cout << "query_id Duplicate Error" << endl;
+        
+        return -1;
+    }
+    else{
+        Query_Buffer* queryBuffer = new Query_Buffer(query);
+        
+        m_BufferManager.insert(pair<string,Query_Buffer*>(query,queryBuffer));
+
+        return 1;
+    }
 }
 

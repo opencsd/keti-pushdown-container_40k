@@ -15,31 +15,55 @@
 #include <mutex>
 #include <condition_variable>
 #include <string.h>
-#include <map>
 #include <cstdlib>
 #include <iomanip>
 #include <sstream>
+#include <list>
+#include <unordered_set>
 
 #include "rapidjson/document.h"
 #include "rapidjson/writer.h"
 #include "rapidjson/stringbuffer.h"
 #include "rapidjson/prettywriter.h" 
 
+#include "TableManager.h"
+
 using namespace std;
 using namespace rapidjson;
 
+#define NUM_OF_BLOCKS 15
+#define BUFF_SIZE (NUM_OF_BLOCKS * 4096)
 #define PORT_BUF 8888
-#define BUFF_SIZE 4096
+#define NCONNECTION 8
 
 template <typename T>
 class WorkQueue;
-//struct Block_Buffer;
+struct Block_Buffer;
+struct Work_Buffer;
+struct Query_Buffer;
+
+struct SnippetData{
+        int work_id;
+        string sstfilename;
+        Value block_info_list;
+        vector<string> table_col;
+        Value table_filter;
+        vector<int> table_offset;
+        vector<int> table_offlen;
+        vector<int> table_datatype;
+        vector<string> sstfilelist;
+        string tablename;
+};
 
 class Scheduler{
 
     public:
         Scheduler() {init_scheduler();}
         vector<int> blockvec;
+        vector<tuple<string,string,string>> savedfilter;
+        vector<int> passindex;
+        SnippetData snippetdata;
+        vector<int> threadblocknum;
     struct Snippet{
         int work_id;
         string sstfilename;
@@ -49,6 +73,8 @@ class Scheduler{
         vector<int> table_offset;
         vector<int> table_offlen;
         vector<int> table_datatype;
+        vector<string> sstfilelist;
+        
 
         Snippet(int work_id_, string sstfilename_,
             Value& block_info_list_,
@@ -73,8 +99,10 @@ class Scheduler{
 
         void init_scheduler();
         void sched(int workid, Value& blockinfo,vector<int> offset, vector<int> offlen, vector<int> datatype, vector<string> tablecol, Value& filter,string sstfilename, string tablename, string res);
-        void csdworkdec(string csdname);
-        void Serialize(Writer<StringBuffer>& writer, Snippet& s, string csd_ip, string tablename, string CSDName);
+        void sched(int indexdata);
+        void csdworkdec(string csdname, int num);
+        void Serialize(PrettyWriter<StringBuffer>& writer, Snippet& s, string csd_ip, string tablename, string CSDName);
+        void Serialize(Writer<StringBuffer>& writer, Snippet& s, string csd_ip, string tablename, string CSDName, int blockidnum);
         string BestCSD(string sstname, int blockworkcount);
         void sendsnippet(string snippet, string ipaddr);
         // void addcsdip(Writer<StringBuffer>& writer, string s);
@@ -96,30 +124,31 @@ class Scheduler{
 
 struct BlockResult{
     int work_id;
-    vector<tuple<int, int, int, bool>> block_id_list; 
-    // block_id : block start offset : block size : is full block
-    // block start offset이 -1이면 데이터 없음
+    vector<pair<int,list<int>>> block_id_list; 
+    // <is full 10 block, block id list>
     vector<int> row_offset; 
     int rows;
-    int data[BUFF_SIZE]; //4k
+    char data[BUFF_SIZE]; //40k
     int length;
     string csd_name;
+    int last_valid_block_id;
+    int result_block_count;
 
     BlockResult(const char* json_, char* data_){
 
         Document document;
-        document.Parse(json_);
+        document.Parse(json_); 
         
         work_id = document["Work ID"].GetInt();
 
         Value &blockList = document["Block ID"];
-        int blockSize = blockList.Size();
-        for(int i = 0; i<blockSize; i++){
-            int block_id_ = blockList[i][0].GetInt();
-            int block_offset_ = blockList[i][1].GetInt();
-            int block_size_ = blockList[i][2].GetInt();
-            bool is_full_block_ = blockList[i][3].GetBool();
-            block_id_list.push_back(make_tuple(block_id_,block_offset_,block_size_,is_full_block_));
+        for(int i = 0; i < blockList.Size(); i++){
+            int is_full = blockList[i][0].GetInt();
+            list<int> b_list;
+            for(int j = 0; j < blockList[i][1].Size(); j++){
+                b_list.push_back(blockList[i][1][j].GetInt());
+            }
+            block_id_list.push_back({is_full,b_list});
         }
 
         rows = document["nrows"].GetInt();
@@ -131,12 +160,12 @@ struct BlockResult{
         }
 
         length = document["Length"].GetInt();
-        //data?
-        for(int i=0; i<BUFF_SIZE; i++){
-            data[i] = data_[i];
-        }
+
+        memcpy(data, data_, length);
 
         csd_name = document["CSD Name"].GetString();
+        last_valid_block_id = document["Last valid block id"].GetInt();
+        result_block_count = document["Result block count"].GetInt();
     }
 };
 
@@ -175,65 +204,148 @@ public:
   bool is_empty(){
     return work.empty();
   }
+
+  void qclear(){
+    work = queue<T>();
+  }
+
+  int get_size(){
+    return work.size();
+  }
 };
 
 struct Block_Buffer {
     int work_id;
     int nrows;
     int length;
-    char rowData[BUFF_SIZE];
-    vector<int> rowoffset;
+    char data[BUFF_SIZE];
+    vector<int> row_offset;
+    bool last_merging_buffer;
+    unordered_map<string,vector<int>> col_offset_list;
+
+    Block_Buffer(){}
+    Block_Buffer(int work_id_){
+      work_id = work_id_;
+      nrows = 0;
+      length = 0;
+      row_offset.clear();
+      last_merging_buffer = false;
+    }
+
+    void InitBlockBuffer(){
+      nrows = 0;
+      length = 0;
+      memset(&data, 0, sizeof(BUFF_SIZE));
+      row_offset.clear();
+      last_merging_buffer = false;
+    }
+};
+
+/*     
+                                Work Type
+  ----------------------------------------------------------------------
+  | JoinX                  : Join X                                    |
+  | JoinO_HasMapX_MakeMapO : Join O / Has_Map X           / Make_Map O |
+  | JoinO_HasMapO_MakeMapX : Join O / Has_Map O = Join O  / Make_Map X |
+  | JoinO_HasMapO_MakeMapO : Join O / Has_Map O = Join O  / Make_Map O |
+  ----------------------------------------------------------------------
+*/
+
+enum Buffer_Work_Type{
+  JoinX,
+  JoinO_HasMapX_MakeMapO,
+  JoinO_HasMapO_MakeMapX,
+  JoinO_HasMapO_MakeMapO
 };
 
 struct Work_Buffer {
-    int WorkID;
-    vector<int> need_block_list;
-    vector<int> merged_block_list;
+    int work_id;
+    string table_name;
+    vector<string> make_map_col;//map을 만들어야하는 컬럼
+    vector<pair<string,string>> join_col;
+    //         <my_col,opp_col> -> join 해야하는 컬럼
+    unordered_set<int> need_block_list;
     Block_Buffer merging_block_buffer;
-    WorkQueue<Block_Buffer> merged_block_buffer;
+    WorkQueue<Block_Buffer> return_block_queue;
+    WorkQueue<Block_Buffer> make_map_queue;
     bool is_done;
-    condition_variable work_available;
-    mutex work_mutex;
+    int work_type;
+    int row_all;
+    int left_block_count;
 
-    Work_Buffer(int workid,vector<int> blocklist, Block_Buffer blockBuffer){
-      blockBuffer.length = 0;
-      blockBuffer.nrows = 0;
-      blockBuffer.work_id = workid;
-      blockBuffer.rowoffset.clear();
-
-      WorkID = workid;
-      need_block_list.assign(blocklist.begin(), blocklist.end());
-      merged_block_list.clear();
-      merging_block_buffer = blockBuffer;
-	  is_done = false;
+    Work_Buffer(int work_id_, string table_name_, 
+                vector<string> make_map_col_,
+                vector<pair<string,string>> join_col_,
+                vector<int> block_list_, int work_type_){
+      work_id = work_id_;
+      table_name = table_name_;
+      make_map_col.assign(make_map_col_.begin(),make_map_col_.end());
+      join_col.assign(join_col_.begin(),join_col_.end());
+      need_block_list = unordered_set<int>(block_list_.begin(), block_list_.end());
+      merging_block_buffer = Block_Buffer(work_id_);
+	    is_done = false;
+      work_type = work_type_;
+      row_all = 0;
+      left_block_count = need_block_list.size();
     }
 
-    // void push_work(Block_Buffer item){
-    //   unique_lock<mutex> lock(work_mutex);
+    void PushWork();
+    void WorkBufferMakeMap(unordered_map<string, unordered_map<int,int>> col_map, TableManager tblManager);
 
-    //   bool was_empty = merged_block_buffer.empty();
-    //   merged_block_buffer.push(item);
-    //   cout << "unlock" << endl;
-    //   lock.unlock();
+};
 
-    //   if (was_empty){
-    //     work_available.notify_one();
-    //   }    
-    // }
+// template <class T>
+// class my_unordered_map :
+//     public std::unordered_map<T, int>
+// {
+// };
 
-    // Block_Buffer wait_and_pop(){
-    //   unique_lock<mutex> lock(work_mutex);
-    //   if (merged_block_buffer.empty()){
-    //       cout << "lock" << endl;
-    //   }
-    //   while (merged_block_buffer.empty()){
-    //     work_available.wait(lock);
-    //   }
 
-    //   Block_Buffer tmp = merged_block_buffer.front();
-    //   merged_block_buffer.pop();
-    //   return tmp;
-    // }
+// struct my_unordered_map{
+//   template <typename T>
+//   unordered_map<T,int> m;
+// };
+
+// struct my_map{
+//   string col_name;
+//   template <typename T> unordered_set<T> set;
+// };
+
+struct Query_Buffer{
+  string query;
+  unordered_map<int,Work_Buffer*> work_buffer_list;
+  unordered_map<string, unordered_set<int>> col_map;
+  //현재 14번 쿼리의 조인 컬럼이 int 형식이라 임시로 int로 지정함
+  // unordered_map<string, my_unordered_map> col_map;
+  // list<my_map> col_map2;
+
+  Query_Buffer(string query_)
+  :query(query_){}
+};
+
+class BufferManager{	
+public:
+    BufferManager(Scheduler &scheduler, TableManager &tblManager){
+      InitBufferManager(scheduler, tblManager);
+    }
+
+    void BlockBufferInput();
+    void BufferRunning(Scheduler &scheduler, TableManager &tblManager);
+    void MergeBlock(BlockResult result, Scheduler &scheduler, TableManager &tblManager);
+    int InitBufferManager(Scheduler &scheduler, TableManager &tblManager);
+    int Join();
+    int GetData(Block_Buffer &dest);
+    int SetWork(string query, int work_id, string table_name,
+        vector<tuple<string,string,string>> join, vector<int> block_list);
+    int InitQuery(string query);
+
+private:
+    unordered_map<string, struct Query_Buffer*> m_BufferManager;
+    unordered_map<int, string> m_WorkIDManager;
+    WorkQueue<BlockResult> BufferQueue;
+    TableManager m_TableManager;
+    thread BufferManager_Input_Thread;
+    thread BufferManager_Thread;
 };
 
 class sumtest {
@@ -245,38 +357,7 @@ class sumtest {
         int offset[16] = {0,4,8,12,16,23,30,37,44,45,46,49,52,55,82,90};
         int offlen[16] = {4,4,4,4,7,7,7,7,1,1,3,3,3,25,10,45};
     //
-    // 6번 7번의 데이터를 변환하면댐 인덱스로는 5,6
-};
-
-
-
-class BufferManager{	
-public:
-    BufferManager(Scheduler &scheduler){
-      InitBufferManager(scheduler);
-    }
-
-    void BlockBufferInput();
-    void BufferRunning(Scheduler &scheduler);
-    void MergeBlock(BlockResult result, Scheduler &scheduler);
-    int InitBufferManager(Scheduler &scheduler);
-    int join();
-    int GetData(Block_Buffer &dest);
-    int SetWork(int work_id, vector<int> Block_list);
-
-    // thread BlockBufferInputThread(){ 
-    //     return thread([=] {BlockBufferInput();});
-    // }
-
-    // thread BufferRunningThread(Scheduler &scheduler){ 
-    //     return thread([=] {BufferRunning(scheduler);});
-    // }
-
-private:
-    unordered_map<int,struct Work_Buffer*> m_BufferManager;
-    thread BufferManager_Input_Thread;
-    thread BufferManager_Thread;
-	WorkQueue<BlockResult> BufferQueue;
+    // 6번 7번의 데이터를 변환하면 됨 인덱스로는 5,6
 };
 
 

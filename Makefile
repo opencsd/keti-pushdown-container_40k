@@ -4,7 +4,7 @@ OBJS=server.o TableManager.o CSDScheduler.o buffer_manager.o
 TARGET=a.out
  
 $(TARGET): $(OBJS) 
-	$(CC)	-o	$@	$(OBJS) -lpthread
+	$(CC)	-o	$@	$(OBJS) -lpthread -lboost_thread
 
 server.o: TableManager.h keti_type.h server.cc buffer_manager.cc
 TableManager.o: TableManager.h TableManager.cc
